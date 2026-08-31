@@ -1,0 +1,15 @@
+cask "macmtp" do
+  version "@MACMTP_VERSION@"
+  sha256 "@MACMTP_RELEASE_SHA256@"
+
+  url "@MACMTP_RELEASE_URL@"
+  name "MacMTP"
+  desc "Access MTP device storage in Finder"
+  homepage "@MACMTP_HOMEPAGE@"
+
+  depends_on macos: :ventura
+
+  app "MacMTP.app"
+
+  uninstall quit: "@MACMTP_BUNDLE_ID@"
+end

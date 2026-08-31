@@ -1,0 +1,38 @@
+# CMake and Ninja build output
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/CTestTestfile.cmake
+/cmake_install.cmake
+/install_manifest.txt
+/compile_commands.json
+/CMakeUserPresets.json
+/build-local.sh
+/release-local.sh
+/build.ninja
+/.ninja_deps
+/.ninja_log
+
+# Xcode user and build state
+/DerivedData/
+xcuserdata/
+*.xcuserstate
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Local signing credentials and provisioning profiles
+*.cer
+*.p12
+*.mobileprovision
+*.provisionprofile
+
+# Editor-local settings
+.idea/
+.vscode/
+*.swp
+*~

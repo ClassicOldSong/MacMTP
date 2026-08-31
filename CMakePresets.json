@@ -1,0 +1,32 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "homebrew-release",
+      "displayName": "Universal notarized Homebrew release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/homebrew-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+        "BUILD_TESTING": "ON",
+        "MACMTP_DISTRIBUTION_SIGNING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "homebrew-release",
+      "configurePreset": "homebrew-release",
+      "targets": [
+        "MacMTPHomebrewRelease"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+[submodule "third_party/libmtp"]
+	path = third_party/libmtp
+	url = https://github.com/libmtp/libmtp.git
+[submodule "third_party/libusb-cmake"]
+	path = third_party/libusb-cmake
+	url = https://github.com/libusb/libusb-cmake.git

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>MacMTP</string>
+  <key>CFBundleExecutable</key>
+  <string>MacMTPFileProvider</string>
+  <key>CFBundleIdentifier</key>
+  <string>@MACMTP_BUNDLE_ID@.FileProvider</string>
+  <key>CFBundleIconFile</key>
+  <string>MacMTP</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>MacMTPFileProvider</string>
+  <key>CFBundlePackageType</key>
+  <string>XPC!</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@PROJECT_VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
+  <key>NSExtension</key>
+  <dict>
+    <key>NSExtensionFileProviderDocumentGroup</key>
+    <string>@MACMTP_APP_GROUP@</string>
+    <key>NSExtensionFileProviderSupportsEnumeration</key>
+    <true/>
+    <key>NSExtensionFileProviderDownloadPipelineDepth</key>
+    <integer>1</integer>
+    <key>NSExtensionFileProviderUploadPipelineDepth</key>
+    <integer>1</integer>
+    <key>NSExtensionFileProviderMetadataOnlyUploadPipelineDepth</key>
+    <integer>1</integer>
+    <key>NSFileProviderDecorations</key>
+    <array>
+      <dict>
+        <key>BadgeImageType</key>
+        <string>com.sudomaker.MacMTP.decoration.device</string>
+        <key>Category</key>
+        <string>FolderBadge</string>
+        <key>Identifier</key>
+        <string>com.sudomaker.MacMTP.decoration.device</string>
+        <key>Label</key>
+        <string>MTP Device</string>
+      </dict>
+    </array>
+    <key>NSExtensionPointIdentifier</key>
+    <string>com.apple.fileprovider-nonui</string>
+    <key>NSExtensionPrincipalClass</key>
+    <string>FileProviderExtension</string>
+  </dict>
+</dict>
+</plist>
