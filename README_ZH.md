@@ -33,6 +33,8 @@ MACMTP_CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
 
 * 请解锁手机并选择 MTP / 文件传输 USB 模式。
 * 执行文件操作时，请避免断开设备连接。
+* Finder 显示拷贝完成后，文件可能仍在同步到设备。请等待菜单栏中的进度结束，或选择卸载后点击“Wait for Sync”。
+* 将文件拖入设备文件夹时，请按住 Option 键，以拷贝文件而非移动。
 
 ## 开源许可
 

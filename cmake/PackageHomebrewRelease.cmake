@@ -38,14 +38,18 @@ foreach(mach_o_file IN LISTS mach_o_files)
   if(NOT EXISTS "${mach_o_file}")
     message(FATAL_ERROR "Expected bundle executable is missing: ${mach_o_file}")
   endif()
-  execute_process(
-    COMMAND /usr/bin/lipo "${mach_o_file}" -verify_arch arm64 x86_64
-    RESULT_VARIABLE architecture_result
-    ERROR_VARIABLE architecture_error)
-  if(NOT architecture_result EQUAL 0)
-    message(FATAL_ERROR
-      "Homebrew release is not universal: ${mach_o_file}\n${architecture_error}")
-  endif()
+  # Some lipo versions reject multiple architectures with -verify_arch. Check
+  # each required slice separately, retaining both universal-build requirements.
+  foreach(required_architecture IN ITEMS arm64 x86_64)
+    execute_process(
+      COMMAND /usr/bin/lipo "${mach_o_file}" -verify_arch "${required_architecture}"
+      RESULT_VARIABLE architecture_result
+      ERROR_VARIABLE architecture_error)
+    if(NOT architecture_result EQUAL 0)
+      message(FATAL_ERROR
+        "Homebrew release is missing ${required_architecture}: ${mach_o_file}\n${architecture_error}")
+    endif()
+  endforeach()
 endforeach()
 
 execute_process(

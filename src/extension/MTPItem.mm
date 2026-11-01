@@ -49,6 +49,15 @@ static BOOL ScanHex(NSString *value, uint32_t *result) {
 
 @implementation MTPItem
 
+- (NSFileProviderContentPolicy)contentPolicy {
+  // These items describe storage on the device. Clean local contents are a
+  // cache, not permanently pinned copies. Explicitly use the macOS 13+ policy
+  // API: the legacy capability fallback otherwise marks them non-evictable.
+  return [self.itemIdentifier isEqualToString:NSFileProviderRootContainerItemIdentifier]
+             ? NSFileProviderContentPolicyDownloadLazily
+             : NSFileProviderContentPolicyInherited;
+}
+
 + (instancetype)rootItemWithName:(NSString *)name {
   MTPItem *item = [[self alloc] init];
   item.itemIdentifier = NSFileProviderRootContainerItemIdentifier;
@@ -61,7 +70,8 @@ static BOOL ScanHex(NSString *value, uint32_t *result) {
   item.itemVersion = [[NSFileProviderItemVersion alloc]
       initWithContentVersion:VersionData(@"root")
              metadataVersion:VersionData(
-                 [item.filename stringByAppendingFormat:@":%@", MTPRootDecorationIdentifier])];
+                 [item.filename stringByAppendingFormat:@":%@:policy=%ld", MTPRootDecorationIdentifier,
+                                                       (long)item.contentPolicy])];
   return item;
 }
 
@@ -84,7 +94,8 @@ static BOOL ScanHex(NSString *value, uint32_t *result) {
                                                  storage->FreeSpaceInBytes];
   item.itemVersion = [[NSFileProviderItemVersion alloc]
       initWithContentVersion:VersionData(version)
-             metadataVersion:VersionData([version stringByAppendingFormat:@":%@", item.filename])];
+             metadataVersion:VersionData([version stringByAppendingFormat:@":%@:policy=%ld", item.filename,
+                                                                         (long)item.contentPolicy])];
   return item;
 }
 
@@ -131,11 +142,12 @@ static BOOL ScanHex(NSString *value, uint32_t *result) {
                                                         metadata->item_id,
                                                         metadata->filesize,
                                                         (long long)metadata->modificationdate];
-  NSString *metadataVersion = [NSString stringWithFormat:@"%@:%08x:%@:%lld",
+  NSString *metadataVersion = [NSString stringWithFormat:@"%@:%08x:%@:%lld:policy=%ld",
                                                          contentVersion,
                                                          metadata->parent_id,
                                                          item.filename,
-                                                         (long long)metadata->modificationdate];
+                                                         (long long)metadata->modificationdate,
+                                                         (long)item.contentPolicy];
   item.itemVersion = [[NSFileProviderItemVersion alloc]
       initWithContentVersion:VersionData(contentVersion)
              metadataVersion:VersionData(metadataVersion)];

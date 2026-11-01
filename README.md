@@ -33,6 +33,8 @@ MACMTP_CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
 
 - Unlock the phone and select its MTP/File Transfer USB mode.
 - Avoid disconnecting the device during file operations.
+- Finder may finish copying locally before the device finishes syncing. Wait for the tray progress to finish, or choose Unmount and then Wait for Sync.
+- Hold Option while dragging files into a device folder to copy instead of move.
 
 ## License
 

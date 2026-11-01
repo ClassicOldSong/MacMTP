@@ -3,6 +3,8 @@
 #import "AboutPanelController.h"
 #import "MTPDevice.h"
 #import "MTPDeviceMonitor.h"
+#import "MTPDomainSyncState.h"
+#import "MTPUnmountController.h"
 
 #import <FileProvider/FileProvider.h>
 #import <ServiceManagement/ServiceManagement.h>
@@ -13,6 +15,10 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
 @interface AppDelegate ()
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSMenu *statusMenu;
+@property(nonatomic, strong) NSImage *idleTrayImage;
+@property(nonatomic, strong) NSProgressIndicator *traySpinner;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, MTPDomainSyncState *> *syncStates;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, MTPUnmountController *> *unmountRequests;
 @property(nonatomic, strong) NSMenuItem *startAtLoginMenuItem;
 @property(nonatomic, strong) MTPDeviceMonitor *deviceMonitor;
 @property(nonatomic, strong) NSArray<MTPDeviceDescriptor *> *devices;
@@ -52,6 +58,8 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
 
   self.devices = @[];
   self.domains = @{};
+  self.syncStates = [NSMutableDictionary dictionary];
+  self.unmountRequests = [NSMutableDictionary dictionary];
   self.manuallyUnmounted = [NSMutableSet set];
   self.pendingDomainOperations = [NSMutableSet set];
   self.pendingDisconnectRemovals = [NSMutableDictionary dictionary];
@@ -65,10 +73,23 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
   if (image != nil) {
     image.size = NSMakeSize(18, 18);
     [image setTemplate:YES];
+    self.idleTrayImage = image;
     self.statusItem.button.image = image;
   } else {
     self.statusItem.button.title = @"MTP";
   }
+  self.traySpinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, 16, 16)];
+  self.traySpinner.style = NSProgressIndicatorStyleSpinning;
+  self.traySpinner.controlSize = NSControlSizeSmall;
+  self.traySpinner.displayedWhenStopped = NO;
+  self.traySpinner.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.statusItem.button addSubview:self.traySpinner];
+  [NSLayoutConstraint activateConstraints:@[
+    [self.traySpinner.centerXAnchor constraintEqualToAnchor:self.statusItem.button.centerXAnchor],
+    [self.traySpinner.centerYAnchor constraintEqualToAnchor:self.statusItem.button.centerYAnchor],
+    [self.traySpinner.widthAnchor constraintEqualToConstant:16],
+    [self.traySpinner.heightAnchor constraintEqualToConstant:16]
+  ]];
 
   self.statusMenu = [[NSMenu alloc] initWithTitle:@"MacMTP"];
   self.statusMenu.delegate = self;
@@ -93,6 +114,9 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
     return NSTerminateLater;
   }
   self.terminating = YES;
+  for (MTPUnmountController *request in self.unmountRequests.allValues) {
+    [request cancel];
+  }
   [self.deviceMonitor stop];
   for (dispatch_block_t removal in self.pendingDisconnectRemovals.allValues) {
     dispatch_block_cancel(removal);
@@ -100,12 +124,58 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
   [self.pendingDisconnectRemovals removeAllObjects];
   self.statusItem.button.enabled = NO;
 
-  [NSFileProviderManager removeAllDomainsWithCompletionHandler:^(NSError *error) {
-    if (error != nil) {
-      NSLog(@"Could not remove File Provider domains while quitting: %@", error);
+  // Quitting must preserve queued writes too: Finder may already have moved
+  // the source file into the domain's local cache.
+  [NSFileProviderManager getDomainsWithCompletionHandler:^(NSArray<NSFileProviderDomain *> *domains,
+                                                          NSError *listError) {
+    if (listError != nil) {
+      NSLog(@"Could not list File Provider domains while quitting: %@", listError);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        self.terminating = NO;
+        self.statusItem.button.enabled = YES;
+        [self.deviceMonitor start];
+        [sender replyToApplicationShouldTerminate:NO];
+        [self presentOperationError:listError title:@"Could Not Quit MacMTP"];
+      });
+      return;
     }
-    dispatch_async(dispatch_get_main_queue(), ^{
-      [sender replyToApplicationShouldTerminate:YES];
+    dispatch_group_t removals = dispatch_group_create();
+    __block NSError *removalError = nil;
+    for (NSFileProviderDomain *domain in domains) {
+      dispatch_group_enter(removals);
+      [NSFileProviderManager removeDomain:domain mode:NSFileProviderDomainRemovalModePreserveDirtyUserData
+                       completionHandler:^(NSURL *preservedLocation, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (error != nil) {
+            NSLog(@"Could not remove %@ while quitting: %@", domain.displayName, error);
+            removalError = error;
+          }
+          if (preservedLocation != nil) {
+            BOOL scoped = [preservedLocation startAccessingSecurityScopedResource];
+            BOOL reachable = [preservedLocation checkResourceIsReachableAndReturnError:nil];
+            if (reachable) {
+              NSLog(@"Local files for %@ preserved at %@", domain.displayName, preservedLocation);
+              [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[preservedLocation]];
+            }
+            if (scoped) {
+              [preservedLocation stopAccessingSecurityScopedResource];
+            }
+          }
+          dispatch_group_leave(removals);
+        });
+      }];
+    }
+    dispatch_group_notify(removals, dispatch_get_main_queue(), ^{
+      if (removalError != nil) {
+        self.terminating = NO;
+        self.statusItem.button.enabled = YES;
+        [self.deviceMonitor start];
+        [sender replyToApplicationShouldTerminate:NO];
+        [self refreshDomainsAndReconcile];
+        [self presentOperationError:removalError title:@"Could Not Quit MacMTP"];
+      } else {
+        [sender replyToApplicationShouldTerminate:YES];
+      }
     });
   }];
   return NSTerminateLater;
@@ -211,6 +281,7 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
         byIdentifier[domain.identifier] = domain;
       }
       self.domains = byIdentifier;
+      [self updateSyncStates];
       self.domainsLoaded = YES;
       [self refreshDevices];
     });
@@ -342,6 +413,7 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
             [self.domains mutableCopy];
         updatedDomains[domain.identifier] = domain;
         self.domains = updatedDomains;
+        [self updateSyncStates];
       }
       [self.pendingDomainOperations removeObject:device.domainIdentifier];
       if (!self.terminating) {
@@ -371,13 +443,16 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
   }
   [self.pendingDomainOperations addObject:domain.identifier];
   __weak typeof(self) weakSelf = self;
-  [NSFileProviderManager removeDomain:domain completionHandler:^(NSError *error) {
+  [self.unmountRequests[domain.identifier] cancel];
+  [NSFileProviderManager removeDomain:domain mode:NSFileProviderDomainRemovalModePreserveDirtyUserData
+                   completionHandler:^(NSURL *preservedLocation, NSError *error) {
     dispatch_async(dispatch_get_main_queue(), ^{
       typeof(self) self = weakSelf;
       if (self == nil) {
         return;
       }
       if (error != nil) {
+        [self.manuallyUnmounted removeObject:domain.identifier];
         NSLog(@"Could not unmount %@: %@", domain.displayName, error);
         if (reportErrors) {
           [self presentOperationError:error title:@"Could Not Unmount Device"];
@@ -387,6 +462,34 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
             [self.domains mutableCopy];
         [updatedDomains removeObjectForKey:domain.identifier];
         self.domains = updatedDomains;
+        [self updateSyncStates];
+        if (preservedLocation != nil) {
+          BOOL scoped = [preservedLocation startAccessingSecurityScopedResource];
+          NSError *locationError = nil;
+          BOOL reachable = [preservedLocation checkResourceIsReachableAndReturnError:&locationError];
+          if (reachable) {
+            NSLog(@"Local files for %@ preserved at %@", domain.displayName, preservedLocation);
+            [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[preservedLocation]];
+          }
+          if (scoped) {
+            [preservedLocation stopAccessingSecurityScopedResource];
+          }
+          // The system may return the old root URL even when eviction left no
+          // files to retain. Only a definite missing path suppresses the notice;
+          // an access error must not hide potentially preserved user data.
+          BOOL missing = [locationError.domain isEqualToString:NSCocoaErrorDomain] &&
+              (locationError.code == NSFileNoSuchFileError || locationError.code == NSFileReadNoSuchFileError);
+          if (reportErrors && !missing) {
+            NSAlert *notice = [[NSAlert alloc] init];
+            notice.messageText = @"Local Files Kept on This Mac";
+            notice.informativeText = reachable
+                ? @"macOS kept local files when unmounting the device. Finder is showing the saved folder. Check these files before deleting them."
+                : @"macOS returned a saved folder, but MacMTP could not open it. Check the folder before deleting any local files.";
+            [notice addButtonWithTitle:@"OK"];
+            [NSApp activateIgnoringOtherApps:YES];
+            [notice runModal];
+          }
+        }
       }
       [self.pendingDomainOperations removeObject:domain.identifier];
       if (!self.terminating) {
@@ -406,9 +509,129 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
     [self.manuallyUnmounted removeObject:device.domainIdentifier];
     [self addDomainForDevice:device reportErrors:YES];
   } else {
-    [self.manuallyUnmounted addObject:device.domainIdentifier];
-    [self removeDomain:domain reportErrors:YES];
+    MTPUnmountController *existing = self.unmountRequests[domain.identifier];
+    for (NSString *identifier in self.unmountRequests.allKeys) {
+      if (![identifier isEqualToString:domain.identifier]) {
+        [self.unmountRequests[identifier] hidePopover];
+      }
+    }
+    if (existing != nil) {
+      [existing showPopover];
+      return;
+    }
+    MTPDomainSyncState *syncState = self.syncStates[domain.identifier];
+    if (syncState == nil) {
+      [self presentOperationError:[NSError errorWithDomain:NSFileProviderErrorDomain
+          code:NSFileProviderErrorServerUnreachable userInfo:@{
+            NSLocalizedDescriptionKey : @"The device's sync status is unavailable. Try mounting it again."
+          }] title:@"Could Not Unmount Device"];
+      return;
+    }
+    MTPUnmountController *request = [[MTPUnmountController alloc]
+        initWithSyncState:syncState statusButton:self.statusItem.button];
+    self.unmountRequests[domain.identifier] = request;
+    __weak typeof(self) weakSelf = self;
+    request.completionHandler = ^(BOOL unmount) {
+      typeof(self) self = weakSelf;
+      [self.unmountRequests removeObjectForKey:domain.identifier];
+      if (unmount && !self.terminating && self.domains[domain.identifier] != nil) {
+        [self.manuallyUnmounted addObject:domain.identifier];
+        [self removeDomain:domain reportErrors:YES];
+      }
+      [self updateTrayProgress];
+      [self rebuildMenu];
+    };
+    [request start];
+    [self updateTrayProgress];
+    [self rebuildMenu];
   }
+}
+
+- (void)updateSyncStates {
+  for (NSString *identifier in self.syncStates.allKeys) {
+    if (self.domains[identifier] == nil) {
+      [self.unmountRequests[identifier] cancel];
+      [self.syncStates removeObjectForKey:identifier];
+    }
+  }
+  for (NSFileProviderDomain *domain in self.domains.allValues) {
+    if (self.syncStates[domain.identifier] == nil) {
+      MTPDomainSyncState *state = [[MTPDomainSyncState alloc] initWithDomain:domain];
+      __weak typeof(self) weakSelf = self;
+      NSString *identifier = domain.identifier;
+      state.changeHandler = ^{
+        typeof(self) self = weakSelf;
+        [self.unmountRequests[identifier] syncDidChange];
+        [self updateTrayProgress];
+      };
+      self.syncStates[identifier] = state;
+    }
+  }
+  [self updateTrayProgress];
+}
+
+- (void)updateTrayProgress {
+  double total = 0;
+  double completed = 0;
+  BOOL busy = NO;
+  BOOL indeterminate = NO;
+  for (MTPDomainSyncState *state in self.syncStates.allValues) {
+    for (NSProgress *progress in @[state.uploads, state.downloads]) {
+      if (!progress.finished) {
+        busy = YES;
+        indeterminate |= progress.totalUnitCount <= 0;
+        total += MAX(0, progress.totalUnitCount);
+        completed += MAX(0, MIN(progress.completedUnitCount, progress.totalUnitCount));
+      }
+    }
+  }
+  // A barrier may still be waiting for changes that have not started uploading.
+  // Keep an indication visible in that gap instead of suggesting it is safe to unplug.
+  for (MTPUnmountController *request in self.unmountRequests.allValues) {
+    if (request.waiting && !request.syncState.busy) {
+      busy = YES;
+      indeterminate = YES;
+    }
+  }
+  if (!busy) {
+    [self.traySpinner stopAnimation:nil];
+    self.statusItem.button.image = self.idleTrayImage;
+    self.statusItem.button.title = self.idleTrayImage != nil ? @"" : @"MTP";
+    self.statusItem.button.toolTip = @"MacMTP";
+    return;
+  }
+  self.statusItem.button.title = @"";
+  if (indeterminate) {
+    self.statusItem.button.image = nil;
+    [self.traySpinner startAnimation:nil];
+    self.statusItem.button.toolTip = @"MacMTP — Syncing. Keep your device connected.";
+    return;
+  }
+  [self.traySpinner stopAnimation:nil];
+  double fraction = total > 0 ? MAX(0, MIN(1, completed / total)) : 0;
+  NSImage *image = [NSImage imageWithSize:NSMakeSize(18, 18) flipped:NO
+      drawingHandler:^BOOL(NSRect rect) {
+    (void)rect;
+    NSBezierPath *track = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(2, 2, 14, 14)];
+    track.lineWidth = 2;
+    [[NSColor.labelColor colorWithAlphaComponent:0.25] setStroke];
+    [track stroke];
+    NSBezierPath *arc = [NSBezierPath bezierPath];
+    arc.lineWidth = 2;
+    arc.lineCapStyle = NSLineCapStyleRound;
+    [arc appendBezierPathWithArcWithCenter:NSMakePoint(9, 9) radius:7
+                              startAngle:90 endAngle:90 - 360 * fraction clockwise:YES];
+    [NSColor.labelColor setStroke];
+    [arc stroke];
+    NSImage *arrows = [NSImage imageWithSystemSymbolName:@"arrow.up.arrow.down"
+                             accessibilityDescription:nil];
+    [arrows drawInRect:NSMakeRect(5, 5, 8, 8)];
+    return YES;
+  }];
+  [image setTemplate:YES];
+  self.statusItem.button.image = image;
+  self.statusItem.button.toolTip = [NSString stringWithFormat:
+      @"MacMTP — Syncing %ld%%. Keep your device connected.", (long)MIN(99, fraction * 100)];
 }
 
 - (void)openDevice:(NSMenuItem *)sender {
@@ -553,13 +776,15 @@ static NSString *const AutoOpenDefaultsKey = @"AutoOpenMountedDevices";
       NSMenu *submenu = [[NSMenu alloc] initWithTitle:device.displayName];
       submenu.autoenablesItems = NO;
       BOOL mounted = self.domains[device.domainIdentifier] != nil;
+      BOOL waiting = self.unmountRequests[device.domainIdentifier] != nil;
 
       NSMenuItem *mount = [[NSMenuItem alloc]
-          initWithTitle:(mounted ? @"Unmount" : @"Mount")
+          initWithTitle:(waiting ? @"Waiting for Sync…" : mounted ? @"Unmount" : @"Mount")
                  action:@selector(mountOrUnmountDevice:)
           keyEquivalent:@""];
       mount.target = self;
       mount.representedObject = device;
+      mount.enabled = ![self.pendingDomainOperations containsObject:device.domainIdentifier];
       [submenu addItem:mount];
 
       NSMenuItem *open = [[NSMenuItem alloc] initWithTitle:@"Open in Finder"

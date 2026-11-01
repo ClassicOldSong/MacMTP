@@ -28,13 +28,17 @@ static int TransferProgress(uint64_t sent, uint64_t total, const void *context) 
   NSProgress *progress = (__bridge NSProgress *)context;
   int64_t boundedTotal = total > INT64_MAX ? INT64_MAX : (int64_t)total;
   int64_t boundedSent = sent > INT64_MAX ? INT64_MAX : (int64_t)sent;
-  progress.totalUnitCount = boundedTotal;
-  progress.completedUnitCount = boundedSent;
+  // libmtp can report all bytes sent before the device's final response (and,
+  // for replacements, cleanup). Reserve the final unit for operation success.
+  progress.totalUnitCount = MAX((int64_t)1, boundedTotal);
+  progress.completedUnitCount = MIN(boundedSent, progress.totalUnitCount - 1);
   return progress.cancelled ? 1 : 0;
 }
 
-static NSProgress *TransferProgressObject(void) {
+static NSProgress *TransferProgressObject(NSProgressFileOperationKind kind) {
   NSProgress *progress = [NSProgress progressWithTotalUnitCount:-1];
+  progress.kind = NSProgressKindFile;
+  progress.fileOperationKind = kind;
   progress.cancellable = YES;
   progress.pausable = NO;
   return progress;
@@ -103,7 +107,7 @@ static char *CopyUTF8String(NSString *string) {
                                  completionHandler:(void (^)(NSURL *, id<NSFileProviderItem>, NSError *))completionHandler {
   (void)requestedVersion;
   (void)request;
-  NSProgress *progress = TransferProgressObject();
+  NSProgress *progress = TransferProgressObject(NSProgressFileOperationKindDownloading);
   [self.connection performWithDevice:^(LIBMTP_mtpdevice_t *device, NSError *connectionError) {
     if (progress.cancelled) {
       completionHandler(nil, nil, CancelledError());
@@ -172,6 +176,8 @@ static char *CopyUTF8String(NSString *string) {
       completionHandler(nil, nil, error);
       return;
     }
+    progress.totalUnitCount = MAX((int64_t)1, item.documentSize.longLongValue);
+    progress.completedUnitCount = progress.totalUnitCount;
     completionHandler(temporaryURL, item, nil);
   }];
   return progress;
@@ -188,7 +194,7 @@ static char *CopyUTF8String(NSString *string) {
                                                     NSError *))completionHandler {
   (void)fields;
   (void)request;
-  NSProgress *progress = TransferProgressObject();
+  NSProgress *progress = TransferProgressObject(NSProgressFileOperationKindUploading);
   [self.connection performWithDevice:^(LIBMTP_mtpdevice_t *device, NSError *connectionError) {
     if (progress.cancelled) {
       completionHandler(nil, 0, NO, CancelledError());
@@ -282,6 +288,7 @@ static char *CopyUTF8String(NSString *string) {
                                               writable:[self storageIsWritable:storageID device:device]];
     LIBMTP_destroy_file_t(uploaded);
     [self signalWorkingSet];
+    progress.completedUnitCount = progress.totalUnitCount;
     completionHandler(created, 0, NO, nil);
   }];
   return progress;
@@ -300,7 +307,7 @@ static char *CopyUTF8String(NSString *string) {
   (void)version;
   (void)options;
   (void)request;
-  NSProgress *progress = TransferProgressObject();
+  NSProgress *progress = TransferProgressObject(NSProgressFileOperationKindUploading);
   [self.connection performWithDevice:^(LIBMTP_mtpdevice_t *device, NSError *connectionError) {
     if (progress.cancelled) {
       completionHandler(nil, 0, NO, CancelledError());
@@ -313,7 +320,32 @@ static char *CopyUTF8String(NSString *string) {
 
     uint32_t originalStorageID = 0;
     uint32_t objectID = 0;
-    if (MTPParseItemIdentifier(item.itemIdentifier, &originalStorageID, &objectID) != MTPItemIdentifierKindObject) {
+    MTPItemIdentifierKind kind = MTPParseItemIdentifier(item.itemIdentifier, &originalStorageID, &objectID);
+    if (kind == MTPItemIdentifierKindRoot || kind == MTPItemIdentifierKindStorage) {
+      NSError *metadataError = nil;
+      MTPItem *container = [self itemForIdentifier:item.itemIdentifier device:device error:&metadataError];
+      if (container == nil) {
+        completionHandler(nil, 0, NO, metadataError);
+        return;
+      }
+      if ((changedFields & (NSFileProviderItemContents | NSFileProviderItemFilename |
+                            NSFileProviderItemParentItemIdentifier)) != 0) {
+        completionHandler(nil, 0, NO, [NSError errorWithDomain:NSCocoaErrorDomain
+            code:NSFileWriteNoPermissionError userInfo:@{
+              NSLocalizedDescriptionKey : @"The device and storage folders cannot be renamed, moved, or replaced."
+            }]);
+        return;
+      }
+      // These virtual directories are not MTP objects and cannot store Finder
+      // timestamps, tags, or xattrs. On macOS 12+, returning the unchanged field
+      // set declares unsupported metadata (NSFileProviderReplicatedExtension),
+      // rather than claiming the storage is missing or the edit was uploaded.
+      progress.totalUnitCount = 1;
+      progress.completedUnitCount = 1;
+      completionHandler(container, changedFields, NO, nil);
+      return;
+    }
+    if (kind != MTPItemIdentifierKindObject) {
       completionHandler(nil, 0, NO, NoSuchItemError(item.itemIdentifier));
       return;
     }
@@ -420,6 +452,7 @@ static char *CopyUTF8String(NSString *string) {
       LIBMTP_destroy_file_t(replacement);
       LIBMTP_destroy_file_t(original);
       [self signalWorkingSet];
+      progress.completedUnitCount = progress.totalUnitCount;
       completionHandler(result, 0, NO, nil);
       return;
     }
@@ -794,6 +827,8 @@ static char *CopyUTF8String(NSString *string) {
   metadata->parent_id = parentID;
   metadata->storage_id = storageID;
   metadata->modificationdate = status.st_mtime;
+
+  progress.totalUnitCount = MAX((int64_t)1, status.st_size);
 
   int result = LIBMTP_Send_File_From_File_Descriptor(device,
                                                      descriptor,

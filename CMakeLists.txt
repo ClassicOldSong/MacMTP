@@ -4,7 +4,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQU
   set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum supported macOS version" FORCE)
 endif()
 
-project(MacMTP VERSION 0.1.0 LANGUAGES C CXX OBJC OBJCXX)
+project(MacMTP VERSION 0.2.0 LANGUAGES C CXX OBJC OBJCXX)
 
 if(NOT APPLE)
   message(FATAL_ERROR "MacMTP only supports macOS")
@@ -110,6 +110,10 @@ add_executable(MacMTP MACOSX_BUNDLE
   src/app/AboutPanelController.mm
   src/app/AppDelegate.h
   src/app/AppDelegate.mm
+  src/app/MTPDomainSyncState.h
+  src/app/MTPDomainSyncState.mm
+  src/app/MTPUnmountController.h
+  src/app/MTPUnmountController.mm
   src/app/MTPDeviceMonitor.h
   src/app/MTPDeviceMonitor.mm)
 set_target_properties(MacMTP PROPERTIES
@@ -225,10 +229,19 @@ if(BUILD_TESTING)
     ${UNIFORMTYPEIDENTIFIERS_FRAMEWORK})
   add_test(NAME MacMTPIdentifierTests COMMAND MacMTPIdentifierTests)
 
+  add_executable(MacMTPSyncTests
+    tests/SyncTests.mm
+    src/app/MTPDomainSyncState.mm
+    src/app/MTPUnmountController.mm)
+  target_include_directories(MacMTPSyncTests PRIVATE src/app)
+  target_compile_options(MacMTPSyncTests PRIVATE -fobjc-arc -Wall -Wextra)
+  target_link_libraries(MacMTPSyncTests PRIVATE ${APPKIT_FRAMEWORK} ${FILEPROVIDER_FRAMEWORK})
+  add_test(NAME MacMTPSyncTests COMMAND MacMTPSyncTests)
+
   add_custom_target(MacMTPHomebrewReleaseTests
     COMMAND ${CMAKE_CTEST_COMMAND} --test-dir "${CMAKE_CURRENT_BINARY_DIR}"
       --output-on-failure
-    DEPENDS MacMTPIdentifierTests
+    DEPENDS MacMTPIdentifierTests MacMTPSyncTests
     USES_TERMINAL
     VERBATIM)
   add_dependencies(MacMTPHomebrewRelease MacMTPHomebrewReleaseTests)

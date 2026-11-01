@@ -1,6 +1,7 @@
 #import "MTPDevice.h"
 #import "FileProviderExtension.h"
 #import "MTPItem.h"
+#import "MTPConnection.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,34 @@ static void Check(bool condition, const char *message) {
     std::abort();
   }
 }
+
+// Only the USB connection is replaced. The provider must handle real storage
+// metadata, missing storage, and forbidden container edits through its own code.
+@interface StorageFixtureConnection : MTPConnection {
+  LIBMTP_mtpdevice_t _fixtureDevice;
+  LIBMTP_devicestorage_t _fixtureStorage;
+}
+@property(nonatomic, strong) NSError *connectionError;
+@end
+
+@implementation StorageFixtureConnection
+- (instancetype)init {
+  self = [super init];
+  if (self) {
+    static char name[] = "Internal Storage";
+    _fixtureStorage.id = 0x00010001;
+    _fixtureStorage.StorageDescription = name;
+    _fixtureStorage.MaxCapacity = 1000000;
+    _fixtureStorage.FreeSpaceInBytes = 500000;
+    _fixtureDevice.storage = &_fixtureStorage;
+  }
+  return self;
+}
+- (void)performWithDevice:(void (^)(LIBMTP_mtpdevice_t *, NSError *))operation {
+  operation(self.connectionError != nil ? nullptr : &_fixtureDevice, self.connectionError);
+}
+- (void)invalidate {}
+@end
 
 int main(void) {
   @autoreleasepool {
@@ -102,6 +131,8 @@ int main(void) {
     Check([item.parentItemIdentifier isEqualToString:@"storage.aabbccdd"], "item parent");
     Check([item.filename isEqualToString:@"photo.jpg"], "item filename");
     Check(!item.folder, "file classification");
+    Check(item.contentPolicy == NSFileProviderContentPolicyInherited,
+          "device files inherit the evictable content policy");
     Check([item.documentSize unsignedLongLongValue] == 12345, "item size");
     Check((item.capabilities & NSFileProviderItemCapabilitiesAllowsWriting) != 0,
           "writable item capability");
@@ -117,6 +148,8 @@ int main(void) {
               completionHandler:^(id<NSFileProviderItem> root, NSError *error) {
       Check(error == nil, "root callback error");
       Check([root.filename isEqualToString:@"Test Device"], "root callback item");
+      Check(root.contentPolicy == NSFileProviderContentPolicyDownloadLazily,
+            "domain uses lazy, evictable caching");
       Check([root conformsToProtocol:@protocol(NSFileProviderItemDecorating)],
             "root decoration protocol");
       NSArray<NSFileProviderItemDecorationIdentifier> *decorations =
@@ -138,6 +171,80 @@ int main(void) {
     Check([trashError.domain isEqualToString:NSCocoaErrorDomain], "Trash error domain");
     Check(trashError.code == NSFeatureUnsupportedError, "Trash error code");
     [provider invalidate];
+
+    FileProviderExtension *storageProvider = [[FileProviderExtension alloc] initWithDomain:domain];
+    StorageFixtureConnection *connection = [[StorageFixtureConnection alloc] init];
+    [storageProvider setValue:connection forKey:@"connection"];
+    LIBMTP_devicestorage_t storage = {};
+    char storageName[] = "Internal Storage";
+    storage.id = 0x00010001;
+    storage.StorageDescription = storageName;
+    MTPItem *storageItem = [MTPItem storageItemWithStorage:&storage];
+    Check(storageItem.contentPolicy == NSFileProviderContentPolicyInherited,
+          "storage folders inherit the domain's cache policy");
+    MTPItem *root = [MTPItem rootItemWithName:domain.displayName];
+    NSFileProviderItemFields metadataFields = NSFileProviderItemContentModificationDate |
+                                               NSFileProviderItemExtendedAttributes;
+    for (MTPItem *container in @[storageItem, root]) {
+      __block BOOL called = NO;
+      [storageProvider modifyItem:container baseVersion:container.itemVersion
+          changedFields:metadataFields contents:nil options:0 request:[[NSFileProviderRequest alloc] init]
+          completionHandler:^(id<NSFileProviderItem> updated, NSFileProviderItemFields pending,
+                              BOOL fetchContent, NSError *error) {
+        Check(error == nil, "virtual container metadata is not a missing-item error");
+        Check([updated.itemIdentifier isEqualToString:container.itemIdentifier],
+              "metadata handling preserves the storage/root identity");
+        Check(pending == metadataFields, "unsupported metadata fields are reported honestly");
+        Check(!fetchContent, "virtual directory metadata does not fetch contents");
+        called = YES;
+      }];
+      Check(called, "container metadata modification callback");
+      for (NSNumber *field in @[@(NSFileProviderItemContents), @(NSFileProviderItemFilename),
+                                @(NSFileProviderItemParentItemIdentifier)]) {
+        called = NO;
+        [storageProvider modifyItem:container baseVersion:container.itemVersion
+            changedFields:field.unsignedLongLongValue contents:nil options:0
+            request:[[NSFileProviderRequest alloc] init]
+            completionHandler:^(id<NSFileProviderItem> updated, NSFileProviderItemFields pending,
+                                BOOL fetchContent, NSError *error) {
+          (void)pending;
+          (void)fetchContent;
+          Check(updated == nil && [error.domain isEqualToString:NSCocoaErrorDomain] &&
+                    error.code == NSFileWriteNoPermissionError,
+                "readonly virtual container edits are rejected rather than acknowledged");
+          called = YES;
+        }];
+        Check(called, "readonly container edit callback");
+      }
+    }
+    storage.id = 0x00020002;
+    MTPItem *missingStorage = [MTPItem storageItemWithStorage:&storage];
+    __block BOOL missingCalled = NO;
+    [storageProvider modifyItem:missingStorage baseVersion:missingStorage.itemVersion
+        changedFields:metadataFields contents:nil options:0 request:[[NSFileProviderRequest alloc] init]
+        completionHandler:^(id<NSFileProviderItem> updated, NSFileProviderItemFields pending,
+                            BOOL fetchContent, NSError *error) {
+      (void)pending;
+      (void)fetchContent;
+      Check(updated == nil && [error.domain isEqualToString:NSFileProviderErrorDomain] &&
+                error.code == NSFileProviderErrorNoSuchItem, "actually missing storage remains an error");
+      missingCalled = YES;
+    }];
+    Check(missingCalled, "missing storage callback");
+    connection.connectionError = MTPServerUnavailableError(@"Disconnected fixture");
+    __block BOOL disconnectedCalled = NO;
+    [storageProvider modifyItem:storageItem baseVersion:storageItem.itemVersion
+        changedFields:metadataFields contents:nil options:0 request:[[NSFileProviderRequest alloc] init]
+        completionHandler:^(id<NSFileProviderItem> updated, NSFileProviderItemFields pending,
+                            BOOL fetchContent, NSError *error) {
+      (void)pending;
+      (void)fetchContent;
+      Check(updated == nil && error.code == NSFileProviderErrorServerUnreachable,
+            "disconnection is not swallowed as unsupported metadata");
+      disconnectedCalled = YES;
+    }];
+    Check(disconnectedCalled, "disconnected storage callback");
+    [storageProvider invalidate];
   }
   return 0;
 }
