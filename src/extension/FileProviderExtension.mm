@@ -238,7 +238,10 @@ static char *CopyUTF8String(NSString *string) {
 
     if ([itemTemplate.contentType conformsToType:UTTypeFolder]) {
       char *folderName = CopyUTF8String(itemTemplate.filename);
-      uint32_t objectID = LIBMTP_Create_Folder(device, folderName, parentID, storageID);
+      // LIBMTP_Create_Folder (unlike LIBMTP_Send_File_*) does not map 0 to the
+      // storage root; Android rejects 0 with Invalid Object Handle.
+      uint32_t folderParentID = parentID == 0 ? LIBMTP_FILES_AND_FOLDERS_ROOT : parentID;
+      uint32_t objectID = LIBMTP_Create_Folder(device, folderName, folderParentID, storageID);
       if (objectID == 0) {
         free(folderName);
         completionHandler(nil,
